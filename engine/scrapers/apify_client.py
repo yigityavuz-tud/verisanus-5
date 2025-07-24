@@ -1,4 +1,3 @@
-# scrapers/apify_client.py
 import logging
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
@@ -34,7 +33,7 @@ class ApifyClient:
                 results.append(item)
             
             self.logger.info(f"Retrieved {len(results)} Google reviews")
-            return self._standardize_google_reviews(results, google_url)
+            return self._process_google_reviews(results, google_url)
             
         except Exception as e:
             self.logger.error(f"Error scraping Google reviews: {e}")
@@ -68,56 +67,61 @@ class ApifyClient:
                 results.append(item)
             
             self.logger.info(f"Retrieved {len(results)} Trustpilot reviews")
-            return self._standardize_trustpilot_reviews(results, website)
+            return self._process_trustpilot_reviews(results, website)
             
         except Exception as e:
             self.logger.error(f"Error scraping Trustpilot reviews: {e}")
             return []
     
-    def _standardize_google_reviews(self, raw_reviews: List[Dict], source_url: str) -> List[Dict]:
-        """Standardize Google reviews format"""
-        standardized = []
+    def _process_google_reviews(self, raw_reviews: List[Dict], source_url: str) -> List[Dict]:
+        """Process Google reviews - flatten raw data and add minimal metadata"""
+        processed = []
         
         for review in raw_reviews:
             try:
-                standardized_review = {
-                    "review_id": review.get("reviewId", ""),
-                    "author": review.get("name", ""),
-                    "rating": review.get("stars", 0),
-                    "text": review.get("text", ""),
-                    "date": review.get("publishedAtDate", ""),
-                    "likes": review.get("likesCount", 0),
+                # Start with the raw review data (flattened)
+                processed_review = review.copy()
+                
+                # Add our metadata fields
+                processed_review.update({
+                    "review_id": review.get("reviewId"),  # Use the actual reviewId from raw data
+                    "rating": review.get("stars"),  # Use stars field from raw data
                     "source_url": source_url,
-                    "raw_data": review
-                }
-                standardized.append(standardized_review)
+                    # Don't add establishment_id, platform, scraped_at here - DB manager will add them
+                })
+                
+                processed.append(processed_review)
                 
             except Exception as e:
-                self.logger.warning(f"Error standardizing Google review: {e}")
+                self.logger.warning(f"Error processing Google review: {e}")
                 continue
         
-        return standardized
+        return processed
     
-    def _standardize_trustpilot_reviews(self, raw_reviews: List[Dict], source_url: str) -> List[Dict]:
-        """Standardize Trustpilot reviews format"""
-        standardized = []
+    def _process_trustpilot_reviews(self, raw_reviews: List[Dict], source_url: str) -> List[Dict]:
+        """Process Trustpilot reviews - flatten raw data and add minimal metadata"""
+        processed = []
         
         for review in raw_reviews:
             try:
-                standardized_review = {
-                    "review_id": review.get("id", ""),
-                    "rating": review.get("rating", 0),
-                    "title": review.get("title", ""),
-                    "text": review.get("text", ""),
-                    "date": review.get("date", ""),
-                    "verified": review.get("verified", False),
+                # Start with the raw review data (flattened)
+                processed_review = review.copy()
+                
+                # Remove authorName if it exists (as per requirements)
+                processed_review.pop('authorName', None)
+                
+                # Add our metadata fields
+                processed_review.update({
+                    "review_id": review.get("reviewUrl", ""),  # Use reviewUrl as review_id
+                    "verified": review.get("verificationLevel") == "verified",  # Convert to boolean
                     "source_url": source_url,
-                    "raw_data": review
-                }
-                standardized.append(standardized_review)
+                    # Don't add establishment_id, platform, scraped_at here - DB manager will add them
+                })
+                
+                processed.append(processed_review)
                 
             except Exception as e:
-                self.logger.warning(f"Error standardizing Trustpilot review: {e}")
+                self.logger.warning(f"Error processing Trustpilot review: {e}")
                 continue
         
-        return standardized
+        return processed

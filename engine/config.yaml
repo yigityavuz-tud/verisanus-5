@@ -9,7 +9,7 @@ google_maps:
     target_fields: []
   
   api_settings:
-    apify_token_file: "tokens/apify_token_dev1.txt"
+    apify_token_file: "tokens/apify_token_dev2.txt"
     max_reviews: 1500
     reviews_sort: "newest"
     language: "en"
@@ -24,7 +24,7 @@ trustpilot:
     target_fields: []
   
   api_settings:
-    apify_token_file: "tokens/apify_token_dev1.txt"
+    apify_token_file: "tokens/apify_token_dev2.txt"
     start_page: 1
     count: 500
     minDelay: 3000

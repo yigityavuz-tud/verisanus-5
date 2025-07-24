@@ -1,4 +1,3 @@
-# database/db_manager.py
 import os
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
@@ -68,10 +67,11 @@ class DatabaseManager:
         )
     
     def save_google_reviews(self, establishment_id: str, reviews: List[Dict]):
-        """Save Google reviews to database"""
+        """Save Google reviews to database with flattened structure"""
         if not reviews:
             return 0
-            
+        
+        # Add metadata to each review
         for review in reviews:
             review["establishment_id"] = establishment_id
             review["platform"] = "google"
@@ -82,10 +82,11 @@ class DatabaseManager:
         return len(result.inserted_ids)
     
     def save_trustpilot_reviews(self, establishment_id: str, reviews: List[Dict]):
-        """Save Trustpilot reviews to database"""
+        """Save Trustpilot reviews to database with flattened structure"""
         if not reviews:
             return 0
-            
+        
+        # Add metadata to each review
         for review in reviews:
             review["establishment_id"] = establishment_id
             review["platform"] = "trustpilot"
