@@ -1,0 +1,66 @@
+# Configuration for the restructured data collection system
+
+google_maps:
+  scraping_criteria:
+    max_reviews_per_establishment: 1500
+    min_reviews_per_establishment: 10
+    require_confirmation: false
+    # Filter establishments by field (optional - if empty, scrapes all)
+    target_fields: []
+  
+  api_settings:
+    apify_token_file: "tokens/apify_token_dev1.txt"
+    max_reviews: 1500
+    reviews_sort: "newest"
+    language: "en"
+    reviews_origin: "all"
+    personal_data: false
+
+trustpilot:
+  scraping_criteria:
+    max_establishments: 100
+    require_website: true  # Only scrape establishments with websites
+    # Filter establishments by field (optional - if empty, scrapes all)
+    target_fields: []
+  
+  api_settings:
+    apify_token_file: "tokens/apify_token_dev1.txt"
+    start_page: 1
+    count: 500
+    minDelay: 3000
+    replies: true
+    sort: "recency"
+    verified: false
+
+# File management settings
+file_management:
+  # Whether to keep individual scrape files after unification
+  keep_individual_files: true
+  
+  # Whether to automatically clean up temp files
+  auto_cleanup_temp: true
+  
+  # Maximum age of temp files before cleanup (hours)
+  temp_file_max_age: 24
+
+# Data processing settings
+data_processing:
+  # Timezone for standardization (always converts to UTC naive)
+  target_timezone: "UTC"
+  
+  # Duplicate handling strategy: "most_filled" or "latest"
+  duplicate_strategy: "most_filled"
+  
+  # Whether to validate data integrity after processing
+  validate_data: true
+
+# Logging and monitoring
+logging:
+  # Whether to log API usage statistics
+  log_api_usage: true
+  
+  # Whether to log processing steps
+  log_processing: true
+  
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  log_level: "INFO"
