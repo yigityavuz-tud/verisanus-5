@@ -195,6 +195,28 @@ class OperationsController:
             self.logger.error(f"Error during unification: {e}")
             return False
     
+    def standardize_reviews(self, establishment_ids: Optional[List[str]] = None, quick: bool = False) -> bool:
+        """Standardize reviews with language translation"""
+        self.logger.info("Starting review language standardization...")
+        
+        try:
+            # Create indexes if they don't exist
+            self.db_manager.create_ls_unified_reviews_indexes()
+            
+            # Run incremental standardization
+            standardization_results = self.db_manager.standardize_reviews_incremental(establishment_ids)
+            
+            if not quick:
+                # Show statistics
+                stats = self.db_manager.get_ls_unified_reviews_stats()
+                self.logger.info(f"Language standardization statistics: {stats}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error during language standardization: {e}")
+            return False
+    
     def show_statistics(self) -> bool:
         """Show database statistics"""
         try:
@@ -203,18 +225,22 @@ class OperationsController:
             # Unified reviews stats
             unified_stats = self.db_manager.get_unified_reviews_stats()
             
+            # Language standardized reviews stats
+            ls_stats = self.db_manager.get_ls_unified_reviews_stats()
+            
             # Raw collection stats
             google_count = self.db_manager.db.google.count_documents({})
             trustpilot_count = self.db_manager.db.trustpilot.count_documents({})
             establishments_count = self.db_manager.db.establishments.count_documents({})
             
-            print("\n" + "="*50)
+            print("\n" + "="*60)
             print("DATABASE STATISTICS")
-            print("="*50)
+            print("="*60)
             print(f"Establishments: {establishments_count}")
             print(f"Google reviews (raw): {google_count}")
             print(f"Trustpilot reviews (raw): {trustpilot_count}")
             print(f"Total raw reviews: {google_count + trustpilot_count}")
+            
             print("\nUnified Reviews:")
             print(f"Total unified: {unified_stats.get('total_reviews', 0)}")
             
@@ -224,7 +250,24 @@ class OperationsController:
                 avg_rating = platform_stat.get('avg_rating', 0)
                 print(f"  {platform.capitalize()}: {count} reviews (avg rating: {avg_rating:.2f})")
             
-            print("="*50)
+            print("\nLanguage Standardized Reviews:")
+            print(f"Total standardized: {ls_stats.get('total_reviews', 0)}")
+            
+            for platform_stat in ls_stats.get('platform_breakdown', []):
+                platform = platform_stat['_id']
+                count = platform_stat['count']
+                avg_rating = platform_stat.get('avg_rating', 0)
+                owner_responses = platform_stat.get('has_owner_response', 0)
+                print(f"  {platform.capitalize()}: {count} reviews (avg rating: {avg_rating:.2f}, owner responses: {owner_responses})")
+            
+            if ls_stats.get('response_language_breakdown'):
+                print("\nOwner Response Languages:")
+                for lang_stat in ls_stats.get('response_language_breakdown', []):
+                    language = lang_stat['_id']
+                    count = lang_stat['count']
+                    print(f"  {language}: {count} responses")
+            
+            print("="*60)
             
             return True
             
@@ -249,6 +292,28 @@ class OperationsController:
         self.logger.info("Scrape and unify operation completed successfully")
         return True
     
+    def scrape_unify_and_standardize(self, excel_path: str, quick_unify: bool = False, quick_standardize: bool = False) -> bool:
+        """Combined operation: scrape reviews, unify them, then standardize them"""
+        self.logger.info("Starting scrape, unify, and standardize operation...")
+        
+        # First scrape
+        if not self.scrape_reviews(excel_path):
+            self.logger.error("Scraping failed, aborting remaining operations")
+            return False
+        
+        # Then unify
+        if not self.unify_reviews(quick=quick_unify):
+            self.logger.error("Unification failed, aborting standardization")
+            return False
+        
+        # Finally standardize
+        if not self.standardize_reviews(quick=quick_standardize):
+            self.logger.error("Standardization failed")
+            return False
+        
+        self.logger.info("Scrape, unify, and standardize operation completed successfully")
+        return True
+    
     def cleanup(self):
         """Clean up resources"""
         if self.db_manager:
@@ -269,13 +334,23 @@ def main():
     unify_parser.add_argument('--establishments', help='Comma-separated establishment IDs to process')
     unify_parser.add_argument('--quick', action='store_true', help='Quick mode with minimal output')
     
+    # Standardize command
+    standardize_parser = subparsers.add_parser('standardize', help='Standardize reviews with language translation')
+    standardize_parser.add_argument('--establishments', help='Comma-separated establishment IDs to process')
+    standardize_parser.add_argument('--quick', action='store_true', help='Quick mode with minimal output')
+    
     # Stats command
     subparsers.add_parser('stats', help='Show database statistics')
     
-    # Combined command
+    # Combined commands
     combined_parser = subparsers.add_parser('scrape-and-unify', help='Scrape reviews then unify them')
     combined_parser.add_argument('--excel', required=True, help='Path to Excel file with establishments')
     combined_parser.add_argument('--quick-unify', action='store_true', help='Use quick mode for unification')
+    
+    full_pipeline_parser = subparsers.add_parser('full-pipeline', help='Scrape, unify, and standardize reviews')
+    full_pipeline_parser.add_argument('--excel', required=True, help='Path to Excel file with establishments')
+    full_pipeline_parser.add_argument('--quick-unify', action='store_true', help='Use quick mode for unification')
+    full_pipeline_parser.add_argument('--quick-standardize', action='store_true', help='Use quick mode for standardization')
     
     args = parser.parse_args()
     
@@ -302,11 +377,24 @@ def main():
                 establishment_ids = [id.strip() for id in args.establishments.split(',')]
             success = controller.unify_reviews(establishment_ids, args.quick)
         
+        elif args.command == 'standardize':
+            establishment_ids = None
+            if args.establishments:
+                establishment_ids = [id.strip() for id in args.establishments.split(',')]
+            success = controller.standardize_reviews(establishment_ids, args.quick)
+        
         elif args.command == 'stats':
             success = controller.show_statistics()
         
         elif args.command == 'scrape-and-unify':
             success = controller.scrape_and_unify(args.excel, args.quick_unify)
+        
+        elif args.command == 'full-pipeline':
+            success = controller.scrape_unify_and_standardize(
+                args.excel, 
+                args.quick_unify, 
+                args.quick_standardize
+            )
         
         if success:
             print(f"\n✅ {args.command.upper()} operation completed successfully!")

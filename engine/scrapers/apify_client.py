@@ -51,7 +51,7 @@ class ApifyClient:
         
         run_input = {
             "companyDomain": trustpilot_domain,
-            "count": 100,
+            "count": 99999,
             "replies": False,
             "startPage": 1,
             "verified": False
