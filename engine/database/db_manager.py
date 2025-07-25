@@ -5,6 +5,7 @@ from pymongo.errors import ConnectionFailure
 from datetime import datetime
 from typing import Optional, Dict, List
 import logging
+from bson import ObjectId
 
 class DatabaseManager:
     def __init__(self):
@@ -101,25 +102,8 @@ class DatabaseManager:
     
     def _standardize_google_review(self, review: Dict) -> Dict:
         """Standardize Google review to unified format"""
-        import hashlib
-        
-        # Generate unified review ID using available identifiers
-        # Use reviewerId + publishedAtDate as fallback if review_id is null
-        review_id = review.get('review_id') or review.get('reviewId')
-        
-        if not review_id:
-            reviewer_id = review.get('reviewerId', 'unknown')
-            pub_date = review.get('publishedAtDate', 'unknown')
-            establishment_id = review.get('establishment_id', 'unknown')
-            review_text = (review.get('text') or '')[:50]  # Safe access to text field
-            
-            # Create a more unique identifier using hash of multiple fields
-            unique_string = f"{reviewer_id}_{pub_date}_{establishment_id}_{review_text}"
-            review_id = hashlib.md5(unique_string.encode('utf-8')).hexdigest()[:12]
-        
-        # Safe access to all fields with proper fallbacks
         return {
-            "unified_review_id": f"google_{review_id}",
+            "_id": review["_id"],  # Use original MongoDB ObjectId as unified review ID
             "original_review_id": review.get('review_id'),
             "establishment_id": review.get('establishment_id'),
             "platform": "google",
@@ -172,18 +156,17 @@ class DatabaseManager:
             "source_url": review.get('source_url', ''),
             "scraped_at": review.get('scraped_at'),
             "scraper_scraped_at": review.get('scrapedAt'),
+            "search_string": review.get('searchString'),
+            "review_origin": review.get('reviewOrigin'),
+            "review_url": review.get('reviewUrl'),
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow()
         }
     
     def _standardize_trustpilot_review(self, review: Dict) -> Dict:
         """Standardize Trustpilot review to unified format"""
-        # Generate unified review ID using available identifiers
-        # Use reviewUrl as review ID if review_id is empty
-        review_id = review.get('review_id') or review.get('reviewUrl', '')
-        
         return {
-            "unified_review_id": f"trustpilot_{review_id}",
+            "_id": review["_id"],  # Use original MongoDB ObjectId as unified review ID
             "original_review_id": review.get('review_id'),
             "establishment_id": review.get('establishment_id'),
             "platform": "trustpilot",
@@ -238,13 +221,14 @@ class DatabaseManager:
             "source_url": review.get('source_url', ''),
             "scraped_at": review.get('scraped_at'),
             "scraper_scraped_at": None,  # Google-specific
+            "review_url": review.get('reviewUrl'),
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow()
         }
     
     def get_existing_unified_review_ids(self) -> set:
         """Get all existing unified review IDs to avoid duplicates"""
-        existing_ids = self.db.unified_reviews.distinct("unified_review_id")
+        existing_ids = self.db.unified_reviews.distinct("_id")
         return set(existing_ids)
     
     def unify_reviews_incremental(self, establishment_ids: List[str] = None) -> Dict[str, int]:
@@ -279,24 +263,8 @@ class DatabaseManager:
         
         for review in google_reviews:
             try:
-                # Generate unified ID using available identifiers since review_id can be null
-                import hashlib
-                
-                review_id = review.get('review_id') or review.get('reviewId')
-                if not review_id:
-                    reviewer_id = review.get('reviewerId', 'unknown')
-                    pub_date = review.get('publishedAtDate', 'unknown')
-                    establishment_id = review.get('establishment_id', 'unknown')
-                    review_text = (review.get('text') or '')[:50]  # Safe access and slice
-                    
-                    # Create a more unique identifier using hash of multiple fields
-                    unique_string = f"{reviewer_id}_{pub_date}_{establishment_id}_{review_text}"
-                    review_id = hashlib.md5(unique_string.encode('utf-8')).hexdigest()[:12]
-                
-                unified_id = f"google_{review_id}"
-                
-                # Skip if already unified
-                if unified_id in existing_unified_ids:
+                # Skip if already unified (using MongoDB _id)
+                if review["_id"] in existing_unified_ids:
                     continue
                 
                 unified_review = self._standardize_google_review(review)
@@ -306,16 +274,15 @@ class DatabaseManager:
                 # Batch insert every 1000 reviews to manage memory
                 if len(reviews_to_insert) >= 1000:
                     try:
-                        self.db.unified_reviews.insert_many(reviews_to_insert)
+                        self.db.unified_reviews.insert_many(reviews_to_insert, ordered=False)
                         self.logger.info(f"Inserted batch of {len(reviews_to_insert)} unified reviews")
                     except Exception as e:
-                        self.logger.error(f"Error inserting batch: {str(e)[:200]}...")  # Truncate error message
-                        # Continue with next batch instead of failing completely
+                        self.logger.error(f"Error inserting batch: {str(e)[:200]}...")
                     reviews_to_insert.clear()
                     
             except Exception as e:
-                self.logger.warning(f"Error processing Google review: {e}")
-                continue  # Skip this review and continue with next one
+                self.logger.warning(f"Error processing Google review {review.get('_id', 'unknown')}: {e}")
+                continue
         
         # Process Trustpilot reviews
         self.logger.info("Processing Trustpilot reviews...")
@@ -323,13 +290,8 @@ class DatabaseManager:
         
         for review in trustpilot_reviews:
             try:
-                # Generate unified ID using available identifiers since review_id can be empty
-                review_id = review.get('review_id') or review.get('reviewUrl', '')
-                
-                unified_id = f"trustpilot_{review_id}"
-                
-                # Skip if already unified
-                if unified_id in existing_unified_ids:
+                # Skip if already unified (using MongoDB _id)
+                if review["_id"] in existing_unified_ids:
                     continue
                 
                 unified_review = self._standardize_trustpilot_review(review)
@@ -339,24 +301,23 @@ class DatabaseManager:
                 # Batch insert every 1000 reviews to manage memory
                 if len(reviews_to_insert) >= 1000:
                     try:
-                        self.db.unified_reviews.insert_many(reviews_to_insert)
+                        self.db.unified_reviews.insert_many(reviews_to_insert, ordered=False)
                         self.logger.info(f"Inserted batch of {len(reviews_to_insert)} unified reviews")
                     except Exception as e:
-                        self.logger.error(f"Error inserting batch: {str(e)[:200]}...")  # Truncate error message
-                        # Continue with next batch instead of failing completely
+                        self.logger.error(f"Error inserting batch: {str(e)[:200]}...")
                     reviews_to_insert.clear()
                     
             except Exception as e:
-                self.logger.warning(f"Error processing Trustpilot review: {e}")
-                continue  # Skip this review and continue with next one
+                self.logger.warning(f"Error processing Trustpilot review {review.get('_id', 'unknown')}: {e}")
+                continue
         
         # Insert remaining reviews
         if reviews_to_insert:
             try:
-                self.db.unified_reviews.insert_many(reviews_to_insert)
+                self.db.unified_reviews.insert_many(reviews_to_insert, ordered=False)
                 self.logger.info(f"Inserted final batch of {len(reviews_to_insert)} unified reviews")
             except Exception as e:
-                self.logger.error(f"Error inserting final batch: {str(e)[:200]}...")  # Truncate error message
+                self.logger.error(f"Error inserting final batch: {str(e)[:200]}...")
         
         total_unified = unified_count["google"] + unified_count["trustpilot"]
         self.logger.info(f"Unification complete! Unified {total_unified} new reviews: "
@@ -364,32 +325,12 @@ class DatabaseManager:
         
         return unified_count
     
-    def unify_all_reviews(self) -> Dict[str, int]:
-        """
-        Unify all reviews from Google and Trustpilot collections.
-        This will drop the existing unified_reviews collection and recreate it.
-        Use with caution - this is a full rebuild.
-        """
-        self.logger.warning("Starting FULL review unification - this will recreate the unified_reviews collection!")
-        
-        # Drop existing unified reviews collection
-        self.db.unified_reviews.drop()
-        self.logger.info("Dropped existing unified_reviews collection")
-        
-        # Create indexes for better performance
-        self.create_unified_reviews_indexes()
-        
-        # Run incremental unification (which will now process all reviews)
-        return self.unify_reviews_incremental()
-    
     def create_unified_reviews_indexes(self):
         """Create indexes on unified_reviews collection for better performance"""
         try:
-            # Create indexes
-            self.db.unified_reviews.create_index("unified_review_id", unique=True)
+            # Create indexes (_id is automatically indexed by MongoDB)
             self.db.unified_reviews.create_index("establishment_id")
             self.db.unified_reviews.create_index("platform")
-            self.db.unified_reviews.create_index("rating")
             self.db.unified_reviews.create_index("review_date")
             self.db.unified_reviews.create_index([("establishment_id", 1), ("platform", 1)])
             
