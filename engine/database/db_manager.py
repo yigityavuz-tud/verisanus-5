@@ -6,12 +6,15 @@ from datetime import datetime
 from typing import Optional, Dict, List
 import logging
 from bson import ObjectId
+import langdetect
+import hashlib
 
 class DatabaseManager:
     def __init__(self):
         self.client = None
         self.db = None
         self.logger = self._setup_logging()
+        self.translation_cache = {}  # In-memory cache for duplicate texts
         
     def _setup_logging(self):
         logging.basicConfig(level=logging.INFO)
@@ -384,6 +387,529 @@ class DatabaseManager:
             cursor = cursor.limit(limit)
         
         return list(cursor)
+    
+    # NEW LANGUAGE STANDARDIZATION METHODS
+    
+    def _detect_language(self, text: str) -> Optional[str]:
+        """Detect language of text using langdetect"""
+        if not text or len(text.strip()) < 5:
+            return None
+        
+        try:
+            detected = langdetect.detect(text)
+            return detected if detected else None
+        except:
+            return None  # Failed detection = assume needs translation
+    
+    def _get_text_hash(self, text: str) -> str:
+        """Generate hash for text caching"""
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+    
+    def _translate_text(self, text: str, source_lang: str = None) -> str:
+        """
+        Translate text to English using Google Gemini API
+        """
+        if not text or not text.strip():
+            return text
+        
+        # Check cache first
+        text_hash = self._get_text_hash(text)
+        if text_hash in self.translation_cache:
+            return self.translation_cache[text_hash]
+        
+        # Initialize translation counter if not exists
+        if not hasattr(self, 'translation_counter'):
+            self.translation_counter = 0
+            self.translation_total = 0
+        
+        # Increment counter for actual translation
+        self.translation_counter += 1
+        
+        # Prompt user every 100 translations
+        if self.translation_counter % 100 == 0:
+            self.logger.info(f"\n{'='*50}")
+            self.logger.info(f"TRANSLATION PROGRESS: {self.translation_counter} texts translated so far")
+            if self.translation_total > 0:
+                self.logger.info(f"Estimated remaining: {self.translation_total - self.translation_counter}")
+            self.logger.info(f"{'='*50}")
+        
+        try:
+            import google.generativeai as genai
+            
+            # Load API key
+            try:
+                with open('tokens/google_api_key.txt', 'r') as f:
+                    api_key = f.read().strip()
+                genai.configure(api_key=api_key)
+            except FileNotFoundError:
+                self.logger.error("Google API key file not found: tokens/google_api_key.txt")
+                return text
+            
+            # Initialize model
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            
+            # Create prompt
+            prompt = f"Translate the following text to English. Return only the translated text with no additional content:\n\n{text}"
+            
+            # Generate translation
+            response = model.generate_content(prompt)
+            translated = response.text.strip()
+            
+            # Cache the result
+            self.translation_cache[text_hash] = translated
+            return translated
+            
+        except Exception as e:
+            self.logger.error(f"Translation failed for text: {str(e)}")
+            return text  # Return original text on failure
+    
+    def _standardize_google_review_ls(self, review: Dict) -> Dict:
+        """Standardize Google review for language standardization"""
+        # Start with the unified review
+        ls_review = review.copy()
+        
+        # Detect language of owner response
+        response_text = review.get('response_from_owner_text')
+        response_language = self._detect_language(response_text)
+        ls_review['response_from_owner_language'] = response_language
+        
+        # Translate owner response if not English
+        if response_text and response_language and response_language != 'en':
+            translated_response = self._translate_text(response_text, response_language)
+            ls_review['response_from_owner_text'] = translated_response
+        
+        # Update timestamps
+        ls_review['updated_at'] = datetime.utcnow()
+        
+        return ls_review
+    
+    def _standardize_trustpilot_review_ls(self, review: Dict) -> Dict:
+        """Standardize Trustpilot review for language standardization"""
+        # Start with the unified review
+        ls_review = review.copy()
+        
+        # Detect language of owner response
+        response_text = review.get('response_from_owner_text')
+        response_language = self._detect_language(response_text)
+        ls_review['response_from_owner_language'] = response_language
+        
+        # Translate review content if not English
+        review_language = review.get('review_language')
+        if review_language and review_language != 'en':
+            title = review.get('title', '')
+            review_text = review.get('review_text', '')
+            
+            # Concatenate title and review text for translation
+            combined_text = f"{title}\n{review_text}".strip()
+            if combined_text:
+                translated_content = self._translate_text(combined_text, review_language)
+                
+                # Split back into title and review text
+                # Simple approach: if original title exists, assume first line is title
+                if title and '\n' in translated_content:
+                    lines = translated_content.split('\n', 1)
+                    ls_review['title'] = lines[0]
+                    ls_review['review_text'] = lines[1] if len(lines) > 1 else ''
+                else:
+                    ls_review['review_text'] = translated_content
+        
+        # Translate owner response if not English
+        if response_text and response_language and response_language != 'en':
+            translated_response = self._translate_text(response_text, response_language)
+            ls_review['response_from_owner_text'] = translated_response
+        
+        # Update timestamps
+        ls_review['updated_at'] = datetime.utcnow()
+        
+        return ls_review
+    
+    def get_existing_ls_unified_review_ids(self) -> set:
+        """Get all existing language standardized review IDs to avoid duplicates"""
+        try:
+            existing_ids = self.db.ls_unified_reviews.distinct("_id")
+            return set(existing_ids)
+        except:
+            # Collection doesn't exist yet
+            return set()
+    
+    def create_ls_unified_reviews_indexes(self):
+        """Create indexes on ls_unified_reviews collection for better performance"""
+        try:
+            # Create indexes (_id is automatically indexed by MongoDB)
+            self.db.ls_unified_reviews.create_index("establishment_id")
+            self.db.ls_unified_reviews.create_index("platform")
+            self.db.ls_unified_reviews.create_index("review_date")
+            self.db.ls_unified_reviews.create_index("response_from_owner_language")
+            self.db.ls_unified_reviews.create_index([("establishment_id", 1), ("platform", 1)])
+            
+            self.logger.info("Created indexes on ls_unified_reviews collection")
+        except Exception as e:
+            self.logger.error(f"Error creating indexes: {e}")
+    
+    def _count_translations_needed(self, establishment_ids: List[str] = None) -> Dict[str, int]:
+        """Count how many translations will be needed before starting standardization"""
+        self.logger.info("Counting translations needed...")
+        
+        # Get existing standardized review IDs to avoid counting duplicates
+        existing_ls_ids = self.get_existing_ls_unified_review_ids()
+        
+        # Build query filter
+        query_filter = {}
+        if establishment_ids:
+            query_filter["establishment_id"] = {"$in": establishment_ids}
+        
+        translation_count = {"google_responses": 0, "trustpilot_content": 0, "trustpilot_responses": 0}
+        
+        # Process in batches to avoid cursor timeout
+        total_reviews = self.db.unified_reviews.count_documents(query_filter)
+        processed_count = 0
+        batch_size = 1000
+        
+        while processed_count < total_reviews:
+            # Get batch of reviews
+            reviews_batch = list(
+                self.db.unified_reviews
+                .find(query_filter)
+                .skip(processed_count)
+                .limit(batch_size)
+            )
+            
+            if not reviews_batch:
+                break
+            
+            for review in reviews_batch:
+                if review["_id"] in existing_ls_ids:
+                    continue
+                    
+                platform = review.get('platform')
+                
+                if platform == 'google':
+                    response_text = review.get('response_from_owner_text')
+                    if response_text:
+                        response_language = self._detect_language(response_text)
+                        if response_language and response_language != 'en':
+                            translation_count["google_responses"] += 1
+                
+                elif platform == 'trustpilot':
+                    # Check review content
+                    review_language = review.get('review_language')
+                    if review_language and review_language != 'en':
+                        title = review.get('title', '')
+                        review_text = review.get('review_text', '')
+                        combined_text = f"{title}\n{review_text}".strip()
+                        if combined_text:
+                            translation_count["trustpilot_content"] += 1
+                    
+                    # Check owner response
+                    response_text = review.get('response_from_owner_text')
+                    if response_text:
+                        response_language = self._detect_language(response_text)
+                        if response_language and response_language != 'en':
+                            translation_count["trustpilot_responses"] += 1
+            
+            processed_count += len(reviews_batch)
+            self.logger.info(f"Counted translations for {processed_count}/{total_reviews} reviews")
+        
+        total_translations = sum(translation_count.values())
+        self.logger.info(f"Translations needed: {total_translations} total "
+                        f"(Google responses: {translation_count['google_responses']}, "
+                        f"Trustpilot content: {translation_count['trustpilot_content']}, "
+                        f"Trustpilot responses: {translation_count['trustpilot_responses']})")
+        
+        return translation_count
+    def standardize_reviews_incremental(self, establishment_ids: List[str] = None) -> Dict[str, int]:
+        """
+        Incrementally standardize reviews from unified_reviews collection.
+        Only processes reviews that haven't been standardized yet.
+        
+        Args:
+            establishment_ids: Optional list of establishment IDs to process. 
+                              If None, processes all establishments.
+        
+        Returns:
+            Dictionary with counts of standardized reviews by platform
+        """
+        self.logger.info("Starting incremental review language standardization...")
+        
+        # Count translations needed first
+        translation_estimates = self._count_translations_needed(establishment_ids)
+        total_translations_needed = sum(translation_estimates.values())
+        
+        if total_translations_needed > 0:
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"TRANSLATION ESTIMATE: {total_translations_needed} texts need translation")
+            self.logger.info(f"Google owner responses: {translation_estimates['google_responses']}")
+            self.logger.info(f"Trustpilot review content: {translation_estimates['trustpilot_content']}")
+            self.logger.info(f"Trustpilot owner responses: {translation_estimates['trustpilot_responses']}")
+            self.logger.info(f"{'='*60}")
+        
+        # Initialize translation counter
+        self.translation_counter = 0
+        self.translation_total = total_translations_needed
+        
+        # Get existing standardized review IDs to avoid duplicates
+        existing_ls_ids = self.get_existing_ls_unified_review_ids()
+        self.logger.info(f"Found {len(existing_ls_ids)} existing language standardized reviews")
+        
+        # Build query filter
+        query_filter = {}
+        if establishment_ids:
+            query_filter["establishment_id"] = {"$in": establishment_ids}
+        
+        standardized_count = {"google": 0, "trustpilot": 0}
+        reviews_to_insert = []
+        translation_count = {"google_responses": 0, "trustpilot_content": 0, "trustpilot_responses": 0}
+        
+    def standardize_reviews_incremental(self, establishment_ids: List[str] = None) -> Dict[str, int]:
+        """
+        Incrementally standardize reviews from unified_reviews collection.
+        Only processes reviews that haven't been standardized yet.
+        
+        Args:
+            establishment_ids: Optional list of establishment IDs to process. 
+                              If None, processes all establishments.
+        
+        Returns:
+            Dictionary with counts of standardized reviews by platform
+        """
+        self.logger.info("Starting incremental review language standardization...")
+        
+        # Count translations needed first
+        translation_estimates = self._count_translations_needed(establishment_ids)
+        total_translations_needed = sum(translation_estimates.values())
+        
+        if total_translations_needed > 0:
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"TRANSLATION ESTIMATE: {total_translations_needed} texts need translation")
+            self.logger.info(f"Google owner responses: {translation_estimates['google_responses']}")
+            self.logger.info(f"Trustpilot review content: {translation_estimates['trustpilot_content']}")
+            self.logger.info(f"Trustpilot owner responses: {translation_estimates['trustpilot_responses']}")
+            self.logger.info(f"{'='*60}")
+        
+        # Initialize translation counter
+        self.translation_counter = 0
+        self.translation_total = total_translations_needed
+        
+        # Get existing standardized review IDs to avoid duplicates
+        existing_ls_ids = self.get_existing_ls_unified_review_ids()
+        self.logger.info(f"Found {len(existing_ls_ids)} existing language standardized reviews")
+        
+        # Build query filter
+        query_filter = {}
+        if establishment_ids:
+            query_filter["establishment_id"] = {"$in": establishment_ids}
+        
+        standardized_count = {"google": 0, "trustpilot": 0}
+        reviews_to_insert = []
+        translation_count = {"google_responses": 0, "trustpilot_content": 0, "trustpilot_responses": 0}
+        
+        # Process reviews in batches to avoid cursor timeout
+        self.logger.info("Processing unified reviews for language standardization...")
+        
+        # Get total count for progress tracking
+        total_reviews_to_process = self.db.unified_reviews.count_documents(query_filter)
+        processed_count = 0
+        batch_size = 500  # Smaller batch size to avoid cursor timeout
+        
+        try:
+            while processed_count < total_reviews_to_process:
+                # Get a batch of reviews with skip and limit
+                unified_reviews_batch = list(
+                    self.db.unified_reviews
+                    .find(query_filter)
+                    .skip(processed_count)
+                    .limit(batch_size)
+                )
+                
+                if not unified_reviews_batch:
+                    break
+                
+                self.logger.info(f"Processing batch {processed_count//batch_size + 1}: "
+                               f"reviews {processed_count + 1}-{processed_count + len(unified_reviews_batch)} "
+                               f"of {total_reviews_to_process}")
+                
+                for review in unified_reviews_batch:
+                    try:
+                        # Skip if already standardized (using MongoDB _id)
+                        if review["_id"] in existing_ls_ids:
+                            continue
+                        
+                        platform = review.get('platform')
+                        
+                        if platform == 'google':
+                            ls_review = self._standardize_google_review_ls(review)
+                            standardized_count["google"] += 1
+                            
+                            # Count translations
+                            if (review.get('response_from_owner_text') and 
+                                ls_review.get('response_from_owner_language') and 
+                                ls_review.get('response_from_owner_language') != 'en'):
+                                translation_count["google_responses"] += 1
+                                
+                        elif platform == 'trustpilot':
+                            ls_review = self._standardize_trustpilot_review_ls(review)
+                            standardized_count["trustpilot"] += 1
+                            
+                            # Count translations
+                            if (review.get('review_language') and 
+                                review.get('review_language') != 'en'):
+                                translation_count["trustpilot_content"] += 1
+                            
+                            if (review.get('response_from_owner_text') and 
+                                ls_review.get('response_from_owner_language') and 
+                                ls_review.get('response_from_owner_language') != 'en'):
+                                translation_count["trustpilot_responses"] += 1
+                        
+                        else:
+                            self.logger.warning(f"Unknown platform: {platform}")
+                            continue
+                        
+                        reviews_to_insert.append(ls_review)
+                        
+                        # Batch insert every 1000 reviews to manage memory
+                        if len(reviews_to_insert) >= 1000:
+                            try:
+                                self.db.ls_unified_reviews.insert_many(reviews_to_insert, ordered=False)
+                                self.logger.info(f"Inserted batch of {len(reviews_to_insert)} standardized reviews")
+                            except Exception as e:
+                                self.logger.error(f"Error inserting batch: {str(e)[:200]}...")
+                            reviews_to_insert.clear()
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Error processing review {review.get('_id', 'unknown')}: {e}")
+                        continue
+                
+                processed_count += len(unified_reviews_batch)
+                
+                # Insert any remaining reviews from this batch
+                if reviews_to_insert:
+                    try:
+                        self.db.ls_unified_reviews.insert_many(reviews_to_insert, ordered=False)
+                        self.logger.info(f"Inserted batch of {len(reviews_to_insert)} standardized reviews")
+                    except Exception as e:
+                        self.logger.error(f"Error inserting batch: {str(e)[:200]}...")
+                    reviews_to_insert.clear()
+        
+        except KeyboardInterrupt:
+            self.logger.info("\nTranslation process interrupted by user")
+            # Save any pending reviews before exiting
+            if reviews_to_insert:
+                try:
+                    self.db.ls_unified_reviews.insert_many(reviews_to_insert, ordered=False)
+                    self.logger.info(f"Saved {len(reviews_to_insert)} reviews before exit")
+                except:
+                    pass
+            raise
+        
+        # Insert any final remaining reviews
+        if reviews_to_insert:
+            try:
+                self.db.ls_unified_reviews.insert_many(reviews_to_insert, ordered=False)
+                self.logger.info(f"Inserted final batch of {len(reviews_to_insert)} standardized reviews")
+            except Exception as e:
+                self.logger.error(f"Error inserting final batch: {str(e)[:200]}...")
+        
+        total_standardized = standardized_count["google"] + standardized_count["trustpilot"]
+        total_translations = sum(translation_count.values())
+        
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"Language standardization complete!")
+        self.logger.info(f"Standardized {total_standardized} new reviews: "
+                        f"Google={standardized_count['google']}, Trustpilot={standardized_count['trustpilot']}")
+        self.logger.info(f"Total translations performed: {getattr(self, 'translation_counter', 0)}")
+        self.logger.info(f"{'='*60}")
+        
+        return {
+            "standardized": standardized_count,
+            "translations_needed": translation_count
+        }
+        
+        total_standardized = standardized_count["google"] + standardized_count["trustpilot"]
+        total_translations = sum(translation_count.values())
+        
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"Language standardization complete!")
+        self.logger.info(f"Standardized {total_standardized} new reviews: "
+                        f"Google={standardized_count['google']}, Trustpilot={standardized_count['trustpilot']}")
+        self.logger.info(f"Total translations performed: {getattr(self, 'translation_counter', 0)}")
+        self.logger.info(f"{'='*60}")
+        
+        return {
+            "standardized": standardized_count,
+            "translations_needed": translation_count
+        }
+    
+    def get_ls_unified_reviews_stats(self) -> Dict:
+        """Get statistics about language standardized reviews"""
+        try:
+            pipeline = [
+                {
+                    "$group": {
+                        "_id": "$platform",
+                        "count": {"$sum": 1},
+                        "avg_rating": {"$avg": "$rating"},
+                        "has_owner_response": {
+                            "$sum": {
+                                "$cond": [{"$ne": ["$response_from_owner_text", None]}, 1, 0]
+                            }
+                        }
+                    }
+                }
+            ]
+            
+            platform_stats = list(self.db.ls_unified_reviews.aggregate(pipeline))
+            
+            # Additional stats for response languages
+            response_lang_pipeline = [
+                {
+                    "$match": {"response_from_owner_language": {"$ne": None}}
+                },
+                {
+                    "$group": {
+                        "_id": "$response_from_owner_language",
+                        "count": {"$sum": 1}
+                    }
+                }
+            ]
+            
+            response_lang_stats = list(self.db.ls_unified_reviews.aggregate(response_lang_pipeline))
+            
+            total_reviews = self.db.ls_unified_reviews.count_documents({})
+            
+            return {
+                "total_reviews": total_reviews,
+                "platform_breakdown": platform_stats,
+                "response_language_breakdown": response_lang_stats,
+                "last_updated": datetime.utcnow()
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting language standardized reviews stats: {e}")
+            return {}
+    
+    def get_ls_unified_reviews_by_establishment(self, establishment_id: str, 
+                                              platform: str = None, 
+                                              limit: int = None) -> List[Dict]:
+        """
+        Get language standardized reviews for a specific establishment
+        
+        Args:
+            establishment_id: The establishment ID
+            platform: Optional platform filter ('google' or 'trustpilot')
+            limit: Optional limit on number of reviews returned
+        """
+        query = {"establishment_id": establishment_id}
+        if platform:
+            query["platform"] = platform
+        
+        try:
+            cursor = self.db.ls_unified_reviews.find(query).sort("review_date", -1)
+            if limit:
+                cursor = cursor.limit(limit)
+            
+            return list(cursor)
+        except Exception as e:
+            self.logger.error(f"Error fetching LS reviews: {e}")
+            return []
     
     def close_connection(self):
         """Close database connection"""
