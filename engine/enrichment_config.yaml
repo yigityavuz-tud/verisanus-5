@@ -1,0 +1,68 @@
+# enrichment_config.yaml
+# Configuration for Review Enrichment Processing
+
+# Target establishments to process (leave empty to process all)
+target_establishments: ["68822a3a1955e8dc333619dd"]
+
+sentiment_attributes:
+  staff_satisfaction:
+    description: "Sentiment about any kind of staff. Owner, nurses, doctors, receptionist etc."
+    enabled: true
+  
+  scheduling:
+    description: "Sentiment about wait times, proper scheduling, good timing, sticking with appointments."
+    enabled: true
+  
+  treatment_satisfaction:
+    description: "Sentiment about clinical competence, effectiveness of the treatment, competency of the expert and the knowledgeability, careful examination."
+    enabled: true
+  
+  onsite_communication:
+    description: "Sentiment about clear, transparent explanation of procedures and risks, clear answering of questions, no language barrier (via translators etc.)."
+    enabled: true
+  
+  facility:
+    description: "Sentiment about cleanliness, modern equipment, sufficient amenities."
+    enabled: true
+  
+  post_op:
+    description: "Sentiment about follow up communication and attention post operation."
+    enabled: true
+  
+  affordability:
+    description: "Sentiment about price level, affordability. Cheap is positive, expensive is negative."
+    enabled: true
+  
+  recommendation:
+    description: "Does the review indicate recommendation or would the patient visit here again?"
+    enabled: true
+  
+  accommodation_transportation:
+    description: "Sentiment about the accommodation and transportation services."
+    enabled: true
+
+complaint_attribute:
+  is_complaint:
+    description: "Does the review include any complaint?"
+    enabled: true
+
+response_attributes:
+  has_constructive_response:
+    description: "Does the response explain the situation or offer a solution?"
+    requires: ["has_response", "is_complaint"]
+    enabled: true
+  
+  has_no_threat:
+    description: "Does the response threaten the reviewer with a legal action?"
+    requires: ["has_response", "is_complaint"]
+    enabled: true
+
+processing:
+  # Number of reviews to process in each batch
+  batch_size: 30
+  
+  # Number of sentiment attributes to process together
+  sentiment_batch_size: 3
+  
+  # Maximum retries for failed API calls
+  max_retries: 3
